@@ -1,10 +1,10 @@
 /* background.js — Service Worker for CaptchaSolver Extension v2
  * Routes captcha solve requests to self-hosted solver backends
- * Universal (:8855) → forwards to Turnstile (:8877) + reCAPTCHA (:8866)
+ * Universal (:8844) → forwards to Turnstile (:8822) + reCAPTCHA (:8833)
  */
 
 const DEFAULTS = {
-  apiUrl: 'http://23.22.196.74:8855',
+  apiUrl: 'http://23.22.196.74:8844',
   apiKey: '8010000000ccojr5nrbg516w5jvw1wu9',
   autoSolve: true,
   solveDelay: 500,
