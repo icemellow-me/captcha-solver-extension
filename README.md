@@ -18,7 +18,7 @@ Auto-detect and solve **reCAPTCHA v2**, **Cloudflare Turnstile**, **hCaptcha**, 
 
 ```
 ┌─────────────────────┐     ┌───────────────────────────────┐
-│  Chrome Extension   │────►│  Universal Solver  (port 8855) │
+│  Chrome Extension   │────►│  Universal Solver  (port 8844) │
 │  ┌───────────────┐  │     │  ddddocr + Tesseract +        │
 │  │ content.js    │  │     │  hcaptcha-challenger +        │
 │  │ (detection +  │  │     │  Puter Vision LLM             │
@@ -28,7 +28,7 @@ Auto-detect and solve **reCAPTCHA v2**, **Cloudflare Turnstile**, **hCaptcha**, 
 │  │ (MAIN world   │  │     ┌────────┘              └────────┐
 │  │  token inject)│  │     ▼                                ▼
 │  ├───────────────┤  │  ┌────────────────┐   ┌──────────────────┐
-│  │ background.js │  │  │ Turnstile :8877 │   │ reCAPTCHA :8866  │
+│  │ background.js │  │  │ Turnstile :8822 │   │ reCAPTCHA :8833  │
 │  │ (API routing) │  │  │ Playwright +    │   │ Playwright +      │
 │  ├───────────────┤  │  │ Headless Chrome  │   │ CaptchaPlugin     │
 │  │ popup/        │  │  └────────────────┘   └──────────────────┘
@@ -37,7 +37,7 @@ Auto-detect and solve **reCAPTCHA v2**, **Cloudflare Turnstile**, **hCaptcha**, 
 └─────────────────────┘
 ```
 
-All solve requests go through the **Universal Solver** (`:8855`) which acts as a hub — it handles image OCR locally and forwards `userrecaptcha` / `turnstile` requests to the dedicated solver backends.
+The extension uses **separate solver instances** (ports 8844/8833/8822) that support `json=1` responses per the 2captcha API spec. Your original solvers (ports 8855/8866/8877) are untouched and use plain-text responses only.
 
 ## Install
 
@@ -51,13 +51,49 @@ All solve requests go through the **Universal Solver** (`:8855`) which acts as a
 
 | Setting | Default | Description |
 |---|---|---|
-| Server URL | `http://23.22.196.74:8855` | Universal Solver API endpoint |
+| Server URL | `http://23.22.196.74:8844` | Extension-specific Universal Solver endpoint |
 | API Key | — | Your solver server API key |
 | Auto-solve | On | Automatically solve detected captchas |
+| Solve Delay | 500ms | Delay before solving (avoid race conditions) |
 | reCAPTCHA | On | Enable/disable reCAPTCHA solving |
 | Turnstile | On | Enable/disable Turnstile solving |
 | hCaptcha | On | Enable/disable hCaptcha solving |
 | Image OCR | On | Enable/disable image captcha OCR |
+
+## How Solving Works
+
+The extension follows the **2captcha API flow**:
+
+```
+┌──────────┐    POST /in.php        ┌──────────┐
+│          │ ─────────────────────► │          │
+│ Extension│    json=1              │  Solver   │
+│          │ ◄───────────────────── │  Server   │
+│          │  {"status":1,          │          │
+│          │   "request":"task_id"} │          │
+│          │                        │          │
+│          │    GET /res.php         │          │
+│          │ ─────────────────────► │          │
+│          │    id=task_id           │          │
+│          │    json=1               │          │
+│          │                        │          │
+│          │ ◄───────────────────── │          │
+│          │  CAPCHA_NOT_READY      │          │
+│          │  (poll again in 3s)    │          │
+│          │                        │          │
+│          │ ◄───────────────────── │          │
+│          │  {"status":1,          │          │
+│          │   "request":"TOKEN"}   │          │
+└──────────┘                        └──────────┘
+```
+
+1. **Submit** — `POST /in.php` with `method`, `sitekey`, `pageurl`, and `json=1`
+2. **Poll** — `GET /res.php?key=...&id=TASK_ID&json=1` every 3 seconds until `{"status":1,...}`
+3. **Inject** — Token is injected into the page via the MAIN world script
+
+### Why `json=1`?
+
+The 2captcha API spec supports `json=1` for structured JSON responses. The Chrome extension uses this to properly parse responses with `.json()`. The extension-specific solver instances on ports 8844/8833/8822 support this parameter. The original solvers (8855/8866/8877) return plain-text only (`OK|id`, `CAPCHA_NOT_READY`).
 
 ## Detection Methods
 
@@ -84,16 +120,6 @@ All solve requests go through the **Universal Solver** (`:8855`) which acts as a
 - Sends to `/solve` endpoint for ddddocr + Tesseract dual-engine OCR
 - Fills OCR result into nearest text input
 
-## Backend Servers
-
-This extension requires the self-hosted solver backends:
-
-- **[universal-captcha-solver](https://github.com/icemellow-me/universal-captcha-solver)** — Image OCR + hCaptcha + forwarding hub (port 8855)
-- **[turnstile-solver](https://github.com/icemellow-me/turnstile-solver)** — Cloudflare Turnstile (port 8877)
-- **[recaptcha-v2-solver](https://github.com/icemellow-me/recaptcha-v2-solver)** — reCAPTCHA v2 with CaptchaPlugin (port 8866)
-
-All backends expose a **2captcha-compatible API** (`/in.php` + `/res.php`) plus a direct JSON endpoint (`/solve`).
-
 ## How Token Injection Works
 
 Chrome extensions run content scripts in an **isolated world** — they cannot access page JavaScript objects like `___grecaptcha_cfg`, `turnstile`, or `hcaptcha`. This extension solves that with a two-layer approach:
@@ -102,6 +128,24 @@ Chrome extensions run content scripts in an **isolated world** — they cannot a
 2. **inject.js** (MAIN world) — injected as a `<script>` element, has full access to page JS objects for token injection
 
 The content script dispatches a `CustomEvent('__captchaSolverInject')` with the token, and the inject script catches it and calls the appropriate page-level callback.
+
+## Backend Servers
+
+This extension requires the self-hosted solver backends. Two sets run side by side:
+
+### Extension-Specific (with `json=1` support)
+- **Universal Solver** — port **8844** (image OCR + hCaptcha + forwarding hub)
+- **reCAPTCHA v2** — port **8833** (Playwright + CaptchaPlugin)
+- **Turnstile** — port **8822** (Playwright + Headless Chrome)
+
+### Original (plain-text responses, for scripts/other tasks)
+- **Universal Solver** — port **8855**
+- **reCAPTCHA v2** — port **8866**
+- **Turnstile** — port **8877**
+
+All backends expose a **2captcha-compatible API** (`/in.php` + `/res.php`) plus a direct JSON endpoint (`/solve`).
+
+See the [Universal Solver README](https://github.com/icemellow-me/universal-captcha-solver) for full API documentation.
 
 ## Development
 
