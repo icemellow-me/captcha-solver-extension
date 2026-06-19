@@ -165,29 +165,130 @@
     if (!captcha.sitekey) return Promise.reject(new Error('No sitekey found'));
     console.log('[CaptchaSolver] Solving reCAPTCHA: ' + captcha.sitekey.substring(0, 8) + '...');
     return sendToBackground('solve-recaptcha', { sitekey: captcha.sitekey, pageurl: captcha.pageurl }).then(function(token) {
-      injectToken('inject-recaptcha', token);
-      var textarea = document.getElementById('g-recaptcha-response');
-      if (textarea) {
-        textarea.value = token;
-        textarea.dispatchEvent(new Event('input', { bubbles: true }));
-        textarea.dispatchEvent(new Event('change', { bubbles: true }));
+      console.log('[CaptchaSolver] Got reCAPTCHA token, injecting into page...');
+
+      // 1. Set the hidden textarea (this is what the form submits)
+      var textareas = document.querySelectorAll('textarea[name="g-recaptcha-response"]');
+      textareas.forEach(function(ta) {
+        ta.value = token;
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+        ta.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+
+      // 2. Also set the g-recaptcha-response div content
+      var responseDiv = document.getElementById('g-recaptcha-response');
+      if (responseDiv && responseDiv.tagName !== 'TEXTAREA') {
+        responseDiv.textContent = token;
       }
+
+      // 3. Inject into MAIN world (triggers callbacks, visual tick, jQuery events)
+      injectToken('inject-recaptcha', token);
+
+      // 4. Send message to reCAPTCHA anchor iframe to trigger green tick
+      //    Our recaptcha-anchor.js content script runs inside the anchor iframe
+      //    and listens for this message type, then clicks the checkbox
+      var anchorFrame = document.querySelector('iframe[src*="recaptcha"][src*="anchor"]') ||
+                        document.querySelector('iframe[src*="recaptcha/api2/anchor"]') ||
+                        document.querySelector('iframe[src*="recaptcha"][src*="bframe"]') ||
+                        document.querySelector('iframe[title*="reCAPTCHA"]');
+      if (anchorFrame) {
+        try {
+          anchorFrame.contentWindow.postMessage({
+            type: '__captchaSolverSolve',
+            token: token
+          }, '*');
+          console.log('[CaptchaSolver] Sent solve message to reCAPTCHA iframe');
+        } catch (e) {
+          console.warn('[CaptchaSolver] Could not message reCAPTCHA iframe:', e.message);
+        }
+      }
+
+      // 5. Wait a moment then check if the visual state updated, if not show overlay
+      setTimeout(function() {
+        checkAndShowOverlay(captcha, token);
+      }, 1500);
+
       return token;
     });
+  }
+
+  /**
+   * Check if the reCAPTCHA widget shows the green tick.
+   * If not, add a visual overlay to indicate it's been solved.
+   */
+  function checkAndShowOverlay(captcha, token) {
+    // Check if the anchor iframe already shows the green tick
+    var anchorFrame = document.querySelector('iframe[src*="recaptcha"][src*="anchor"]') ||
+                      document.querySelector('iframe[src*="recaptcha/api2/anchor"]');
+    if (anchorFrame) {
+      try {
+        var doc = anchorFrame.contentDocument;
+        if (doc && doc.querySelector('.recaptcha-checkbox-checked')) {
+          console.log('[CaptchaSolver] ✓ reCAPTCHA green tick confirmed');
+          return; // Already showing green tick
+        }
+      } catch (e) {
+        // Cross-origin, can't check — show overlay
+      }
+    }
+
+    // If we can't confirm the green tick, add a visual "SOLVED" badge on the widget
+    var container = captcha.element;
+    if (!container) {
+      container = document.querySelector('.g-recaptcha') || document.querySelector('[data-sitekey]');
+    }
+    if (container && !container.dataset.__solverBadge) {
+      container.dataset.__solverBadge = 'true';
+
+      var badge = document.createElement('div');
+      badge.className = '__captcha-solver-solved-badge';
+      badge.style.cssText = 'position:absolute;top:0;left:0;right:0;bottom:0;' +
+        'background:rgba(255,255,255,0.9);display:flex;align-items:center;justify-content:center;' +
+        'z-index:10000;font:600 13px/1 Roboto,-apple-system,sans-serif;color:#1e8e3e;' +
+        'border-radius:3px;pointer-events:none;';
+      badge.innerHTML = '✅ Solved';
+      
+      var wrapper = container.closest('.g-recaptcha') || container;
+      if (getComputedStyle(wrapper).position === 'static') {
+        wrapper.style.position = 'relative';
+      }
+      wrapper.appendChild(badge);
+
+      console.log('[CaptchaSolver] Added visual solved overlay (green tick may not show cross-origin)');
+    }
   }
 
   function solveTurnstile(captcha) {
     if (!captcha.sitekey) return Promise.reject(new Error('No Turnstile sitekey found'));
     console.log('[CaptchaSolver] Solving Turnstile: ' + captcha.sitekey.substring(0, 8) + '...');
     return sendToBackground('solve-turnstile', { sitekey: captcha.sitekey, pageurl: captcha.pageurl }).then(function(token) {
+      console.log('[CaptchaSolver] Got Turnstile token, injecting into page...');
+
+      // Set hidden inputs
+      var inputs = document.querySelectorAll('input[name="cf-turnstile-response"]');
+      inputs.forEach(function(input) {
+        input.value = token;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+
+      // Also set any named form inputs
+      var namedInputs = document.querySelectorAll('input[name="cf-turnstile-response"], input[name="g-recaptcha-response"]');
+      namedInputs.forEach(function(input) {
+        input.value = token;
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+
+      // Inject into MAIN world (triggers callbacks)
       injectToken('inject-turnstile', token);
+
+      // Try data-callback
       var container = captcha.element && captcha.element.closest('[data-turnstile-sitekey]') || captcha.element;
       if (container) {
-        var input = container.querySelector('input[name="cf-turnstile-response"]') || container.querySelector('input[type="hidden"]');
-        if (input) { input.value = token; input.dispatchEvent(new Event('change', { bubbles: true })); }
         var cbName = container.dataset && container.dataset.turnstileCallback;
         if (cbName && typeof window[cbName] === 'function') window[cbName](token);
       }
+
       return token;
     });
   }
@@ -196,13 +297,25 @@
     if (!captcha.sitekey) return Promise.reject(new Error('No hCaptcha sitekey found'));
     console.log('[CaptchaSolver] Solving hCaptcha: ' + captcha.sitekey.substring(0, 8) + '...');
     return sendToBackground('solve-hcaptcha', { sitekey: captcha.sitekey, pageurl: captcha.pageurl }).then(function(token) {
+      console.log('[CaptchaSolver] Got hCaptcha token, injecting into page...');
+
+      // Set textarea
+      var textareas = document.querySelectorAll('textarea[name="h-captcha-response"]');
+      textareas.forEach(function(ta) {
+        ta.value = token;
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+        ta.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+
+      // Inject into MAIN world
       injectToken('inject-hcaptcha', token);
-      var textarea = document.querySelector('textarea[name="h-captcha-response"]');
-      if (textarea) { textarea.value = token; textarea.dispatchEvent(new Event('input', { bubbles: true })); }
+
+      // Try data-callback
       var widget = document.querySelector('.h-captcha[data-callback]');
       if (widget && widget.dataset.callback && typeof window[widget.dataset.callback] === 'function') {
         window[widget.dataset.callback](token);
       }
+
       return token;
     });
   }
