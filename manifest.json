@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "CaptchaSolver — Universal Auto-Solver",
-  "version": "2.1.0",
-  "description": "Auto-detect and solve reCAPTCHA v2/v3, Cloudflare Turnstile, hCaptcha, and image captchas using self-hosted AI solvers",
+  "version": "2.2.0",
+  "description": "Auto-detect and solve reCAPTCHA v2/v3, Cloudflare Turnstile, hCaptcha, xCaptcha, and image captchas using self-hosted AI solvers",
   "permissions": ["storage", "activeTab", "scripting"],
   "host_permissions": ["http://*/*", "https://*/*"],
   "background": { "service_worker": "background.js" },
@@ -21,9 +21,14 @@
     "js": ["recaptcha-anchor.js"],
     "run_at": "document_idle",
     "all_frames": true
+  }, {
+    "matches": ["*://*.xcaptcha.com/*", "*://*.static.xcaptcha.com/*"],
+    "js": ["xcaptcha-frame.js"],
+    "run_at": "document_idle",
+    "all_frames": true
   }],
   "web_accessible_resources": [{
     "matches": ["http://*/*", "https://*/*"],
-    "resources": ["inject.js"]
+    "resources": ["inject.js", "xcaptcha-frame.js"]
   }]
 }

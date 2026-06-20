@@ -162,6 +162,30 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return token;
     },
     // Direct API
+    'solve-xcaptcha': async () => {
+      const { sitekey, pageurl } = msg;
+      // xCaptcha uses same 2captcha-compatible API with method=wcaptcha
+      const token = await solveCaptcha('wcaptcha', { sitekey, pageurl });
+      totalSolved++;
+      updateBadge(totalSolved);
+      return token;
+    },
+    'solve-xcaptcha-text': async () => {
+      const { siteKey, taskKey, taskType } = msg;
+      // Text captcha — try OCR/classification
+      const result = await solveDirect({ type: 'xcaptcha_text', site_key: siteKey, task_key: taskKey });
+      totalSolved++;
+      updateBadge(totalSolved);
+      return result;
+    },
+    'solve-xcaptcha-dynamics': async () => {
+      const { siteKey, taskKey, taskType, socket, size } = msg;
+      // Sliding puzzle — try solver
+      const result = await solveDirect({ type: 'xcaptcha_dynamics', site_key: siteKey, task_key: taskKey, socket, size });
+      totalSolved++;
+      updateBadge(totalSolved);
+      return result;
+    },
     'solve-image': async () => {
       const { image_base64 } = msg;
       const result = await solveDirect({ type: 'image', image_base64 });

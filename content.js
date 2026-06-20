@@ -116,6 +116,52 @@
         });
         return found;
       }
+    },
+    xcaptcha: {
+      name: 'xCaptcha (wCaptcha)',
+      detect: function() {
+        var found = [];
+        // Detect by widget container div
+        document.querySelectorAll('.wcaptcha, [data-wcaptcha], [data-sitekey][data-wcaptcha]').forEach(function(el) {
+          var sitekey = el.dataset && (el.dataset.wcaptchaSitekey || el.dataset.sitekey) || '';
+          if (!found.find(function(f) { return f.sitekey === sitekey && f.type === 'xcaptcha'; })) {
+            found.push({ type: 'xcaptcha', sitekey: sitekey, element: el, pageurl: location.href, source: 'widget' });
+          }
+        });
+        // Detect by iframe(s) — xCaptcha creates _2cFrame1 (checkbox) + _2cFrame2 (challenge)
+        document.querySelectorAll('iframe[id*="_2cFrame"], iframe[src*="xcaptcha"], iframe[src*="static.xcaptcha.com"]').forEach(function(iframe) {
+          var src = iframe.src || '';
+          var sitekey = '';
+          var m = src.match(/[?&]sitekey=([^&]+)/);
+          if (m) sitekey = m[1];
+          // Also check parent element for sitekey
+          var parent = iframe.closest('.wcaptcha, [data-wcaptcha-sitekey]');
+          if (!sitekey && parent && parent.dataset) {
+            sitekey = parent.dataset.wcaptchaSitekey || parent.dataset.sitekey || '';
+          }
+          var id = sitekey || iframe.id || src.substring(0, 60);
+          if (!found.find(function(f) { return f._iframeId === id; })) {
+            found.push({ type: 'xcaptcha', sitekey: sitekey, element: iframe, pageurl: location.href, _iframeId: id });
+          }
+        });
+        // Detect by wCaptcha input field
+        document.querySelectorAll('input[name="wcaptcha_response"], input[name="wcaptcha-response"]').forEach(function(input) {
+          var widget = input.closest('.wcaptcha') || input.parentElement;
+          var sitekey = widget && widget.dataset ? (widget.dataset.wcaptchaSitekey || widget.dataset.sitekey) : '';
+          if (!found.find(function(f) { return f.type === 'xcaptcha' && f.sitekey === sitekey; })) {
+            found.push({ type: 'xcaptcha', sitekey: sitekey, element: widget || input, input: input, pageurl: location.href });
+          }
+        });
+        // Detect via wCaptcha global object (from main world)
+        if (window.__wcaptchaInfo) {
+          window.__wcaptchaInfo.forEach(function(info) {
+            if (!found.find(function(f) { return f.sitekey === info.sitekey; })) {
+              found.push({ type: 'xcaptcha', sitekey: info.sitekey, element: null, pageurl: location.href, source: 'global' });
+            }
+          });
+        }
+        return found;
+      }
     }
   };
 
@@ -360,11 +406,153 @@
     });
   }
 
+  function solveXCaptcha(captcha) {
+    console.log('[CaptchaSolver] Solving xCaptcha (wCaptcha)');
+    var sitekey = captcha.sitekey;
+
+    // Strategy: interact with the xCaptcha frames to trigger the solve
+    // 1. Click the checkbox iframe (_2cFrame1) to open the challenge
+    // 2. Send solve command to the challenge iframe (_2cFrame2)
+    // 3. Listen for the response token from the challenge iframe
+    // 4. Set the wcaptcha_response input with the token
+
+    return new Promise(function(resolve, reject) {
+      var timeout = setTimeout(function() {
+        reject(new Error('xCaptcha solve timeout'));
+      }, 60000);
+
+      // Listen for messages from the xCaptcha challenge frame script
+      function onMessage(e) {
+        if (!e.data || !e.data.type) return;
+        if (e.data.type === '__captchaSolverXCaptchaSolved') {
+          clearTimeout(timeout);
+          window.removeEventListener('message', onMessage);
+          var token = e.data.token;
+          console.log('[CaptchaSolver] xCaptcha solved! Token: ' + (token || '').substring(0, 20) + '...');
+
+          // Set the wcaptcha_response input
+          var inputs = document.querySelectorAll('input[name="wcaptcha_response"], input[name="wcaptcha-response"]');
+          inputs.forEach(function(input) {
+            input.value = token;
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+          });
+
+          // Try to trigger the wCaptcha callback
+          var script = document.createElement('script');
+          script.textContent = '(function(){try{if(window._wcaptcha&&window._wcaptcha.callback)window._wcaptcha.callback("' + (token || '').replace(/"/g, '\\"') + '");}catch(e){}})();';
+          (document.head || document.documentElement).appendChild(script);
+          script.remove();
+
+          resolve(token);
+        } else if (e.data.type === '__captchaSolverXCaptchaError') {
+          clearTimeout(timeout);
+          window.removeEventListener('message', onMessage);
+          reject(new Error(e.data.error || 'xCaptcha solve failed'));
+        }
+      }
+      window.addEventListener('message', onMessage);
+
+      // Step 1: Click the checkbox frame to open the challenge
+      var checkboxFrame = document.querySelector('iframe[id*="_2cFrame1"]') ||
+                           document.querySelector('iframe[src*="xcaptcha"][src*="anchor"]') ||
+                           document.querySelector('iframe[src*="xcaptcha"]:first-of-type');
+      if (checkboxFrame) {
+        try {
+          // Try to click inside the checkbox iframe
+          var checkboxDoc = checkboxFrame.contentDocument;
+          if (checkboxDoc) {
+            var cb = checkboxDoc.querySelector('#checkbox, input[type="checkbox"], .checkbox');
+            if (cb) {
+              cb.click();
+              console.log('[CaptchaSolver] Clicked xCaptcha checkbox');
+            }
+          }
+        } catch (e) {
+          // Cross-origin — try clicking the iframe element itself
+          console.log('[CaptchaSolver] xCaptcha checkbox is cross-origin, clicking iframe...');
+          checkboxFrame.click();
+        }
+
+        // Also try to simulate a click at the iframe position
+        var rect = checkboxFrame.getBoundingClientRect();
+        var clickEvent = new MouseEvent('click', {
+          bubbles: true, cancelable: true,
+          clientX: rect.left + rect.width / 2,
+          clientY: rect.top + rect.height / 2
+        });
+        checkboxFrame.dispatchEvent(clickEvent);
+      }
+
+      // Step 2: Wait for challenge frame to appear, then send solve command
+      var challengeFrame = document.querySelector('iframe[id*="_2cFrame2"]') ||
+                           document.querySelector('iframe[src*="xcaptcha"][src*="captcha"]');
+      if (challengeFrame) {
+        // Send solve command to the frame (our xcaptcha-frame.js will handle it)
+        setTimeout(function() {
+          try {
+            challengeFrame.contentWindow.postMessage({
+              type: '__captchaSolverSolveXCaptcha',
+              siteKey: sitekey
+            }, '*');
+            console.log('[CaptchaSolver] Sent solve command to xCaptcha challenge frame');
+          } catch (e) {
+            // Cross-origin: the frame script should auto-solve
+            console.log('[CaptchaSolver] xCaptcha challenge frame is cross-origin, frame script should auto-solve');
+          }
+        }, 2000);
+      } else {
+        // Challenge frame might not be loaded yet — wait and retry
+        var frameCheck = setInterval(function() {
+          var frame = document.querySelector('iframe[id*="_2cFrame2"]') ||
+                      document.querySelector('iframe[src*="xcaptcha"][src*="captcha"]');
+          if (frame) {
+            clearInterval(frameCheck);
+            try {
+              frame.contentWindow.postMessage({
+                type: '__captchaSolverSolveXCaptcha',
+                siteKey: sitekey
+              }, '*');
+              console.log('[CaptchaSolver] Sent solve command to xCaptcha challenge frame (delayed)');
+            } catch (e) {
+              console.log('[CaptchaSolver] xCaptcha challenge frame still cross-origin');
+            }
+          }
+        }, 1000);
+        // Stop checking after 15s
+        setTimeout(function() { clearInterval(frameCheck); }, 15000);
+      }
+
+      // Step 3: Also try solving via the background script (API-based approach)
+      // as a fallback in case frame-based solving doesn't work
+      if (sitekey) {
+        sendToBackground('solve-xcaptcha', { sitekey: sitekey, pageurl: captcha.pageurl }).then(function(token) {
+          if (token) {
+            clearTimeout(timeout);
+            window.removeEventListener('message', onMessage);
+            console.log('[CaptchaSolver] xCaptcha solved via API! Token: ' + token.substring(0, 20) + '...');
+            var inputs = document.querySelectorAll('input[name="wcaptcha_response"], input[name="wcaptcha-response"]');
+            inputs.forEach(function(input) {
+              input.value = token;
+              input.dispatchEvent(new Event('input', { bubbles: true }));
+              input.dispatchEvent(new Event('change', { bubbles: true }));
+            });
+            injectToken('inject-xcaptcha', token);
+            resolve(token);
+          }
+        }).catch(function(e) {
+          console.warn('[CaptchaSolver] xCaptcha API solve failed: ' + e.message + ', frame-based solving in progress...');
+        });
+      }
+    });
+  }
+
   var SOLVERS = {
     recaptcha: solveRecaptcha,
     turnstile: solveTurnstile,
     hcaptcha: solveHcaptcha,
-    imageCaptcha: solveImageCaptcha
+    imageCaptcha: solveImageCaptcha,
+    xcaptcha: solveXCaptcha
   };
 
   /* — Visual Feedback Badge — */
