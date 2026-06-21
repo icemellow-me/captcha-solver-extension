@@ -5,12 +5,14 @@
 
 const DEFAULTS = {
   apiUrl: 'http://23.22.196.74:8844',
+  xcaptchaUrl: 'http://23.22.196.74:8899',
   apiKey: '8010000000ccojr5nrbg516w5jvw1wu9',
   autoSolve: true,
   solveDelay: 500,
   solveRecaptcha: true,
   solveTurnstile: true,
   solveHcaptcha: true,
+  solveXcaptcha: true,
   solveImage: true,
   maxPollWait: 120,
 };
@@ -164,27 +166,60 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     // Direct API
     'solve-xcaptcha': async () => {
       const { sitekey, pageurl } = msg;
-      // xCaptcha uses same 2captcha-compatible API with method=wcaptcha
-      const token = await solveCaptcha('wcaptcha', { sitekey, pageurl });
-      totalSolved++;
-      updateBadge(totalSolved);
-      return token;
+      // Route xCaptcha to dedicated solver on port 8899
+      const cfg = await getConfig();
+      const xcaptchaUrl = cfg.xcaptchaUrl || 'http://23.22.196.74:8899';
+      const url = new URL('/in.php', xcaptchaUrl);
+      const body = new URLSearchParams({ key: cfg.apiKey, method: 'wcaptcha', sitekey, pageurl, json: '1' });
+      log(`Submitting xCaptcha task to ${xcaptchaUrl}`);
+      const resp = await fetch(url.toString(), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body.toString(),
+      });
+      const data = await resp.json();
+      if (data.status !== 1) throw new Error(data.request || 'xCaptcha submit failed');
+      const taskId = data.request;
+      // Poll for result
+      const pollUrl = new URL('/res.php', xcaptchaUrl);
+      const start = Date.now();
+      const maxWait = cfg.maxPollWait || 120;
+      while ((Date.now() - start) < maxWait * 1000) {
+        pollUrl.search = new URLSearchParams({ key: cfg.apiKey, id: taskId, json: '1' }).toString();
+        const pollResp = await fetch(pollUrl.toString());
+        const pollData = await pollResp.json();
+        if (pollData.status === 1) { totalSolved++; updateBadge(totalSolved); return pollData.request; }
+        if (pollData.request !== 'CAPCHA_NOT_READY') throw new Error(pollData.request || 'xCaptcha solve failed');
+        await new Promise(r => setTimeout(r, 2000));
+      }
+      throw new Error('xCaptcha solve timeout');
     },
     'solve-xcaptcha-text': async () => {
       const { siteKey, taskKey, taskType } = msg;
-      // Text captcha — try OCR/classification
-      const result = await solveDirect({ type: 'xcaptcha_text', site_key: siteKey, task_key: taskKey });
-      totalSolved++;
-      updateBadge(totalSolved);
-      return result;
+      const cfg = await getConfig();
+      const xcaptchaUrl = cfg.xcaptchaUrl || 'http://23.22.196.74:8899';
+      // Direct solve endpoint for text-type challenges
+      const resp = await fetch(`${xcaptchaUrl}/solve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: cfg.apiKey, site_key: siteKey, type: 'xcaptcha_text' }),
+      });
+      const data = await resp.json();
+      if (data.status === 'solved') { totalSolved++; updateBadge(totalSolved); return data.solution; }
+      throw new Error(data.error || 'xCaptcha text solve failed');
     },
     'solve-xcaptcha-dynamics': async () => {
       const { siteKey, taskKey, taskType, socket, size } = msg;
-      // Sliding puzzle — try solver
-      const result = await solveDirect({ type: 'xcaptcha_dynamics', site_key: siteKey, task_key: taskKey, socket, size });
-      totalSolved++;
-      updateBadge(totalSolved);
-      return result;
+      const cfg = await getConfig();
+      const xcaptchaUrl = cfg.xcaptchaUrl || 'http://23.22.196.74:8899';
+      const resp = await fetch(`${xcaptchaUrl}/solve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: cfg.apiKey, site_key: siteKey, type: 'xcaptcha_dynamics' }),
+      });
+      const data = await resp.json();
+      if (data.status === 'solved') { totalSolved++; updateBadge(totalSolved); return data.solution; }
+      throw new Error(data.error || 'xCaptcha dynamics solve failed');
     },
     'solve-image': async () => {
       const { image_base64 } = msg;
