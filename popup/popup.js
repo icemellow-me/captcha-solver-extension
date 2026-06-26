@@ -43,6 +43,8 @@ function checkHealth() {
       { label: 'Tesseract', value: engines.tesseract ? '\u2713' : '\u2717', cls: engines.tesseract ? 'ok' : 'err' },
       { label: 'hCaptcha', value: engines.hcaptcha ? '\u2713' : '\u2717', cls: engines.hcaptcha ? 'ok' : 'err' },
       { label: 'Puter Vision', value: engines.puter_vision ? '\u2713' : '\u2717', cls: engines.puter_vision ? 'ok' : 'err' },
+      { label: 'CF Vision', value: engines.cf_vision ? '\u2713' : '\u2717', cls: engines.cf_vision ? 'ok' : 'err' },
+      { label: 'xCaptcha', value: engines.xcaptcha ? '\u2713' : '\u2717', cls: engines.xcaptcha ? 'ok' : 'err' },
       { label: 'Queue', value: health.queue || 0, cls: 'warn' },
     ];
     el.innerHTML = rows.map(function(r) {
@@ -61,7 +63,8 @@ var TYPE_NAMES = {
   recaptcha: 'reCAPTCHA v2',
   turnstile: 'Turnstile',
   hcaptcha: 'hCaptcha',
-  imageCaptcha: 'Image Captcha'
+  imageCaptcha: 'Image Captcha',
+  xcaptcha: 'xCaptcha'
 };
 
 function refreshCaptchas() {
@@ -134,11 +137,12 @@ function loadConfig() {
     $('#cfg-turnstile').classList.toggle('active', cfg.solveTurnstile !== false);
     $('#cfg-hcaptcha').classList.toggle('active', cfg.solveHcaptcha !== false);
     $('#cfg-image').classList.toggle('active', cfg.solveImage !== false);
+    $('#cfg-xcaptcha').classList.toggle('active', cfg.solveXcaptcha !== false);
   }).catch(function() {});
 }
 
 // Toggle click handlers
-['cfg-auto', 'cfg-recaptcha', 'cfg-turnstile', 'cfg-hcaptcha', 'cfg-image'].forEach(function(id) {
+['cfg-auto', 'cfg-recaptcha', 'cfg-turnstile', 'cfg-hcaptcha', 'cfg-image', 'cfg-xcaptcha'].forEach(function(id) {
   $('#' + id).addEventListener('click', function() {
     this.classList.toggle('active');
   });
@@ -153,6 +157,7 @@ $('#btn-save').addEventListener('click', function() {
     solveTurnstile: $('#cfg-turnstile').classList.contains('active'),
     solveHcaptcha: $('#cfg-hcaptcha').classList.contains('active'),
     solveImage: $('#cfg-image').classList.contains('active'),
+    solveXcaptcha: $('#cfg-xcaptcha').classList.contains('active'),
   };
   msg('set-config', { config: config }).then(function() {
     log('Settings saved', 'log-ok');

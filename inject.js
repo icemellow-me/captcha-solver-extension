@@ -321,6 +321,67 @@
     }));
   }
 
+  /* ── xCaptcha (wCaptcha) Injection ── */
+
+  function injectXcaptchaToken(token) {
+    console.log('[CaptchaSolver] MAIN world: Injecting xCaptcha token (' + (token || '').substring(0, 20) + '...)');
+    let injected = false;
+
+    // Method 1: Set the hidden wcaptcha_response input
+    document.querySelectorAll('input[name="wcaptcha_response"], input[name="wcaptcha-response"]').forEach(function(input) {
+      input.value = token;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      console.log('[CaptchaSolver] ✓ xCaptcha token set in hidden input');
+      injected = true;
+    });
+
+    // Method 2: Call __wcaptcha.success() callback if available
+    if (window.__wcaptcha && typeof window.__wcaptcha.success === 'function') {
+      try {
+        window.__wcaptcha.success(token);
+        injected = true;
+        console.log('[CaptchaSolver] ✓ xCaptcha token via __wcaptcha.success()');
+      } catch (e) {
+        console.warn('[CaptchaSolver] __wcaptcha.success() error:', e);
+      }
+    }
+
+    // Method 3: Call _wcaptcha.callback if available (older wCaptcha API)
+    if (!injected && window._wcaptcha && typeof window._wcaptcha.callback === 'function') {
+      try {
+        window._wcaptcha.callback(token);
+        injected = true;
+        console.log('[CaptchaSolver] ✓ xCaptcha token via _wcaptcha.callback()');
+      } catch (e) {}
+    }
+
+    // Method 4: Global callback search
+    if (!injected) {
+      var xcCallbacks = ['wcaptchaCallback', 'onWcaptchaLoad', 'onXcaptchaLoad', 'xcaptchaCallback', 'wcaptchaSuccess'];
+      for (var i = 0; i < xcCallbacks.length; i++) {
+        if (typeof window[xcCallbacks[i]] === 'function') {
+          try { window[xcCallbacks[i]](token); injected = true; break; } catch (e) {}
+        }
+      }
+    }
+
+    // Method 5: Custom events
+    document.dispatchEvent(new CustomEvent('wcaptcha:success', { detail: { token: token } }));
+    document.dispatchEvent(new CustomEvent('xcaptcha:success', { detail: { token: token } }));
+
+    // Method 6: Post message to xCaptcha iframes (checkbox + challenge frames)
+    document.querySelectorAll('iframe[id*="_2cFrame"], iframe[src*="xcaptcha"], iframe[src*="static.xcaptcha.com"]').forEach(function(frame) {
+      try {
+        frame.contentWindow.postMessage({ type: '__captchaSolverXCaptchaToken', token: token }, '*');
+      } catch (e) {}
+    });
+
+    if (!injected) {
+      console.warn('[CaptchaSolver] xCaptcha: No callback found, token set in input only');
+    }
+  }
+
   /* ── Main Event Listener ── */
 
   window.addEventListener('__captchaSolverInject', function(e) {
@@ -332,6 +393,8 @@
       injectTurnstileToken(token);
     } else if (action === 'inject-hcaptcha') {
       injectHcaptchaToken(token);
+    } else if (action === 'inject-xcaptcha') {
+      injectXcaptchaToken(token);
     }
   });
 
@@ -342,9 +405,11 @@
       recaptcha: !!window.___grecaptcha_cfg,
       turnstile: !!window.turnstile,
       hcaptcha: !!window.hcaptcha,
+      xcaptcha: !!(window.__wcaptcha || window._wcaptcha || document.querySelector('iframe[src*="xcaptcha"]')),
       recaptchaSitekeys: [],
       turnstileSitekeys: [],
       hcaptchaSitekeys: [],
+      xcaptchaSitekeys: [],
     };
 
     // Extract reCAPTCHA sitekeys from internal config
@@ -378,6 +443,19 @@
       const key = el.dataset.hcaptchaSitekey || el.dataset.sitekey;
       if (key && !info.hcaptchaSitekeys.includes(key)) info.hcaptchaSitekeys.push(key);
     });
+
+    // Extract xCaptcha sitekeys (wCaptcha widgets)
+    document.querySelectorAll('[data-wcaptcha-sitekey], [data-sitekey].wcaptcha, iframe[src*="xcaptcha"]').forEach(function(el) {
+      const key = el.dataset.wcaptchaSitekey || el.dataset.sitekey;
+      if (key && !info.xcaptchaSitekeys.includes(key)) info.xcaptchaSitekeys.push(key);
+    });
+    // Also from API object if present
+    if (window.__wcaptcha && window.__wcaptcha.siteKey && !info.xcaptchaSitekeys.includes(window.__wcaptcha.siteKey)) {
+      info.xcaptchaSitekeys.push(window.__wcaptcha.siteKey);
+    }
+    if (window._wcaptcha && window._wcaptcha.siteKey && !info.xcaptchaSitekeys.includes(window._wcaptcha.siteKey)) {
+      info.xcaptchaSitekeys.push(window._wcaptcha.siteKey);
+    }
 
     window.postMessage({ type: '__captchaSolverInfo', info }, '*');
   }

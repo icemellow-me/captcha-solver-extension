@@ -163,24 +163,30 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       updateBadge(totalSolved);
       return token;
     },
-    // Direct API
+    // xCaptcha — dedicated 2captcha-compatible solver on port 8899
     'solve-xcaptcha': async () => {
       const { sitekey, pageurl } = msg;
-      // Route xCaptcha to dedicated solver on port 8899
       const cfg = await getConfig();
       const xcaptchaUrl = cfg.xcaptchaUrl || 'http://23.22.196.74:8899';
-      const url = new URL('/in.php', xcaptchaUrl);
-      const body = new URLSearchParams({ key: cfg.apiKey, method: 'wcaptcha', sitekey, pageurl, json: '1' });
-      log(`Submitting xCaptcha task to ${xcaptchaUrl}`);
-      const resp = await fetch(url.toString(), {
+      // Submit via 2captcha protocol: POST /in.php
+      const submitUrl = new URL('/in.php', xcaptchaUrl);
+      const submitBody = new URLSearchParams({
+        key: cfg.apiKey,
+        method: 'wcaptcha',
+        sitekey: sitekey,
+        pageurl: pageurl || '',
+        json: '1'
+      });
+      log(`Submitting xCaptcha task to ${xcaptchaUrl} (sitekey=${(sitekey || '').substring(0, 12)}...)`);
+      const submitResp = await fetch(submitUrl.toString(), {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: body.toString(),
+        body: submitBody.toString(),
       });
-      const data = await resp.json();
-      if (data.status !== 1) throw new Error(data.request || 'xCaptcha submit failed');
-      const taskId = data.request;
-      // Poll for result
+      const submitData = await submitResp.json();
+      if (submitData.status !== 1) throw new Error(submitData.request || 'xCaptcha submit failed');
+      const taskId = submitData.request;
+      // Poll for result via 2captcha protocol: GET /res.php
       const pollUrl = new URL('/res.php', xcaptchaUrl);
       const start = Date.now();
       const maxWait = cfg.maxPollWait || 120;
@@ -188,38 +194,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         pollUrl.search = new URLSearchParams({ key: cfg.apiKey, id: taskId, json: '1' }).toString();
         const pollResp = await fetch(pollUrl.toString());
         const pollData = await pollResp.json();
-        if (pollData.status === 1) { totalSolved++; updateBadge(totalSolved); return pollData.request; }
+        if (pollData.status === 1) {
+          totalSolved++;
+          updateBadge(totalSolved);
+          log(`xCaptcha solved! Token: ${String(pollData.request).substring(0, 30)}...`);
+          return pollData.request;
+        }
         if (pollData.request !== 'CAPCHA_NOT_READY') throw new Error(pollData.request || 'xCaptcha solve failed');
         await new Promise(r => setTimeout(r, 2000));
       }
       throw new Error('xCaptcha solve timeout');
-    },
-    'solve-xcaptcha-text': async () => {
-      const { siteKey, taskKey, taskType } = msg;
-      const cfg = await getConfig();
-      const xcaptchaUrl = cfg.xcaptchaUrl || 'http://23.22.196.74:8899';
-      // Direct solve endpoint for text-type challenges
-      const resp = await fetch(`${xcaptchaUrl}/solve`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key: cfg.apiKey, site_key: siteKey, type: 'xcaptcha_text' }),
-      });
-      const data = await resp.json();
-      if (data.status === 'solved') { totalSolved++; updateBadge(totalSolved); return data.solution; }
-      throw new Error(data.error || 'xCaptcha text solve failed');
-    },
-    'solve-xcaptcha-dynamics': async () => {
-      const { siteKey, taskKey, taskType, socket, size } = msg;
-      const cfg = await getConfig();
-      const xcaptchaUrl = cfg.xcaptchaUrl || 'http://23.22.196.74:8899';
-      const resp = await fetch(`${xcaptchaUrl}/solve`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key: cfg.apiKey, site_key: siteKey, type: 'xcaptcha_dynamics' }),
-      });
-      const data = await resp.json();
-      if (data.status === 'solved') { totalSolved++; updateBadge(totalSolved); return data.solution; }
-      throw new Error(data.error || 'xCaptcha dynamics solve failed');
     },
     'solve-image': async () => {
       const { image_base64 } = msg;

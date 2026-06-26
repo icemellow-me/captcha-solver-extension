@@ -35,6 +35,13 @@
           }
         }
       }
+      if (info.xcaptchaSitekeys) {
+        for (const sk of info.xcaptchaSitekeys) {
+          if (!window.__captchaSolverDetected.find(function(d) { return d.type === 'xcaptcha' && d.sitekey === sk; })) {
+            window.__captchaSolverDetected.push({ type: 'xcaptcha', sitekey: sk, pageurl: location.href, source: 'mainworld' });
+          }
+        }
+      }
     }
   });
 
@@ -407,143 +414,31 @@
   }
 
   function solveXCaptcha(captcha) {
-    console.log('[CaptchaSolver] Solving xCaptcha (wCaptcha)');
+    console.log('[CaptchaSolver] Solving xCaptcha (wCaptcha) via API');
     var sitekey = captcha.sitekey;
+    if (!sitekey) {
+      // Try to extract from the widget's data attributes
+      var widget = document.querySelector('[data-sitekey][data-wcaptcha], .wcaptcha[data-sitekey]');
+      if (widget) sitekey = widget.dataset.wcaptchaSitekey || widget.dataset.sitekey;
+    }
+    if (!sitekey) return Promise.reject(new Error('No xCaptcha sitekey found'));
 
-    // Strategy: interact with the xCaptcha frames to trigger the solve
-    // 1. Click the checkbox iframe (_2cFrame1) to open the challenge
-    // 2. Send solve command to the challenge iframe (_2cFrame2)
-    // 3. Listen for the response token from the challenge iframe
-    // 4. Set the wcaptcha_response input with the token
+    return sendToBackground('solve-xcaptcha', { sitekey: sitekey, pageurl: captcha.pageurl || location.href }).then(function(token) {
+      console.log('[CaptchaSolver] Got xCaptcha token: ' + (token || '').substring(0, 30) + '...');
 
-    return new Promise(function(resolve, reject) {
-      var timeout = setTimeout(function() {
-        reject(new Error('xCaptcha solve timeout'));
-      }, 60000);
+      // 1. Set the hidden input (primary — what the form submits)
+      var inputs = document.querySelectorAll('input[name="wcaptcha_response"], input[name="wcaptcha-response"]');
+      inputs.forEach(function(input) {
+        input.value = token;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      });
 
-      // Listen for messages from the xCaptcha challenge frame script
-      function onMessage(e) {
-        if (!e.data || !e.data.type) return;
-        if (e.data.type === '__captchaSolverXCaptchaSolved') {
-          clearTimeout(timeout);
-          window.removeEventListener('message', onMessage);
-          var token = e.data.token;
-          console.log('[CaptchaSolver] xCaptcha solved! Token: ' + (token || '').substring(0, 20) + '...');
+      // 2. Inject into MAIN world (triggers __wcaptcha.success(), _wcaptcha.callback, etc.)
+      injectToken('inject-xcaptcha', token);
 
-          // Set the wcaptcha_response input
-          var inputs = document.querySelectorAll('input[name="wcaptcha_response"], input[name="wcaptcha-response"]');
-          inputs.forEach(function(input) {
-            input.value = token;
-            input.dispatchEvent(new Event('input', { bubbles: true }));
-            input.dispatchEvent(new Event('change', { bubbles: true }));
-          });
-
-          // Try to trigger the wCaptcha callback
-          var script = document.createElement('script');
-          script.textContent = '(function(){try{if(window._wcaptcha&&window._wcaptcha.callback)window._wcaptcha.callback("' + (token || '').replace(/"/g, '\\"') + '");}catch(e){}})();';
-          (document.head || document.documentElement).appendChild(script);
-          script.remove();
-
-          resolve(token);
-        } else if (e.data.type === '__captchaSolverXCaptchaError') {
-          clearTimeout(timeout);
-          window.removeEventListener('message', onMessage);
-          reject(new Error(e.data.error || 'xCaptcha solve failed'));
-        }
-      }
-      window.addEventListener('message', onMessage);
-
-      // Step 1: Click the checkbox frame to open the challenge
-      var checkboxFrame = document.querySelector('iframe[id*="_2cFrame1"]') ||
-                           document.querySelector('iframe[src*="xcaptcha"][src*="anchor"]') ||
-                           document.querySelector('iframe[src*="xcaptcha"]:first-of-type');
-      if (checkboxFrame) {
-        try {
-          // Try to click inside the checkbox iframe
-          var checkboxDoc = checkboxFrame.contentDocument;
-          if (checkboxDoc) {
-            var cb = checkboxDoc.querySelector('#checkbox, input[type="checkbox"], .checkbox');
-            if (cb) {
-              cb.click();
-              console.log('[CaptchaSolver] Clicked xCaptcha checkbox');
-            }
-          }
-        } catch (e) {
-          // Cross-origin — try clicking the iframe element itself
-          console.log('[CaptchaSolver] xCaptcha checkbox is cross-origin, clicking iframe...');
-          checkboxFrame.click();
-        }
-
-        // Also try to simulate a click at the iframe position
-        var rect = checkboxFrame.getBoundingClientRect();
-        var clickEvent = new MouseEvent('click', {
-          bubbles: true, cancelable: true,
-          clientX: rect.left + rect.width / 2,
-          clientY: rect.top + rect.height / 2
-        });
-        checkboxFrame.dispatchEvent(clickEvent);
-      }
-
-      // Step 2: Wait for challenge frame to appear, then send solve command
-      var challengeFrame = document.querySelector('iframe[id*="_2cFrame2"]') ||
-                           document.querySelector('iframe[src*="xcaptcha"][src*="captcha"]');
-      if (challengeFrame) {
-        // Send solve command to the frame (our xcaptcha-frame.js will handle it)
-        setTimeout(function() {
-          try {
-            challengeFrame.contentWindow.postMessage({
-              type: '__captchaSolverSolveXCaptcha',
-              siteKey: sitekey
-            }, '*');
-            console.log('[CaptchaSolver] Sent solve command to xCaptcha challenge frame');
-          } catch (e) {
-            // Cross-origin: the frame script should auto-solve
-            console.log('[CaptchaSolver] xCaptcha challenge frame is cross-origin, frame script should auto-solve');
-          }
-        }, 2000);
-      } else {
-        // Challenge frame might not be loaded yet — wait and retry
-        var frameCheck = setInterval(function() {
-          var frame = document.querySelector('iframe[id*="_2cFrame2"]') ||
-                      document.querySelector('iframe[src*="xcaptcha"][src*="captcha"]');
-          if (frame) {
-            clearInterval(frameCheck);
-            try {
-              frame.contentWindow.postMessage({
-                type: '__captchaSolverSolveXCaptcha',
-                siteKey: sitekey
-              }, '*');
-              console.log('[CaptchaSolver] Sent solve command to xCaptcha challenge frame (delayed)');
-            } catch (e) {
-              console.log('[CaptchaSolver] xCaptcha challenge frame still cross-origin');
-            }
-          }
-        }, 1000);
-        // Stop checking after 15s
-        setTimeout(function() { clearInterval(frameCheck); }, 15000);
-      }
-
-      // Step 3: Also try solving via the background script (API-based approach)
-      // as a fallback in case frame-based solving doesn't work
-      if (sitekey) {
-        sendToBackground('solve-xcaptcha', { sitekey: sitekey, pageurl: captcha.pageurl }).then(function(token) {
-          if (token) {
-            clearTimeout(timeout);
-            window.removeEventListener('message', onMessage);
-            console.log('[CaptchaSolver] xCaptcha solved via API! Token: ' + token.substring(0, 20) + '...');
-            var inputs = document.querySelectorAll('input[name="wcaptcha_response"], input[name="wcaptcha-response"]');
-            inputs.forEach(function(input) {
-              input.value = token;
-              input.dispatchEvent(new Event('input', { bubbles: true }));
-              input.dispatchEvent(new Event('change', { bubbles: true }));
-            });
-            injectToken('inject-xcaptcha', token);
-            resolve(token);
-          }
-        }).catch(function(e) {
-          console.warn('[CaptchaSolver] xCaptcha API solve failed: ' + e.message + ', frame-based solving in progress...');
-        });
-      }
+      // 3. Listen for solved confirmation from frame (optional, for visual feedback only)
+      return token;
     });
   }
 
