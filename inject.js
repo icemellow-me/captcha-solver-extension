@@ -445,6 +445,12 @@
     });
 
     // Extract xCaptcha sitekeys (wCaptcha widgets)
+    // Primary: __wCaptchaDiv[data-sitekey] — the standard xCaptcha container
+    document.querySelectorAll('#__wCaptchaDiv[data-sitekey], [id*="wCaptcha"][data-sitekey]').forEach(function(el) {
+      const key = el.dataset.sitekey;
+      if (key && !info.xcaptchaSitekeys.includes(key)) info.xcaptchaSitekeys.push(key);
+    });
+    // Legacy selectors
     document.querySelectorAll('[data-wcaptcha-sitekey], [data-sitekey].wcaptcha, iframe[src*="xcaptcha"]').forEach(function(el) {
       const key = el.dataset.wcaptchaSitekey || el.dataset.sitekey;
       if (key && !info.xcaptchaSitekeys.includes(key)) info.xcaptchaSitekeys.push(key);

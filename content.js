@@ -128,44 +128,62 @@
       name: 'xCaptcha (wCaptcha)',
       detect: function() {
         var found = [];
-        // Detect by widget container div
+        var seen = {};
+        // 1. Primary: __wCaptchaDiv with data-sitekey (most reliable)
+        document.querySelectorAll('#__wCaptchaDiv[data-sitekey], [id*="wCaptcha"][data-sitekey]').forEach(function(el) {
+          var sitekey = el.dataset.sitekey;
+          if (sitekey && !seen[sitekey]) {
+            seen[sitekey] = true;
+            found.push({ type: 'xcaptcha', sitekey: sitekey, element: el, pageurl: location.href, source: '__wCaptchaDiv' });
+          }
+        });
+        // 2. Legacy: widget container div with wcaptcha class/data-attrs
         document.querySelectorAll('.wcaptcha, [data-wcaptcha], [data-sitekey][data-wcaptcha]').forEach(function(el) {
           var sitekey = el.dataset && (el.dataset.wcaptchaSitekey || el.dataset.sitekey) || '';
-          if (!found.find(function(f) { return f.sitekey === sitekey && f.type === 'xcaptcha'; })) {
+          if (sitekey && !seen[sitekey]) {
+            seen[sitekey] = true;
             found.push({ type: 'xcaptcha', sitekey: sitekey, element: el, pageurl: location.href, source: 'widget' });
           }
         });
-        // Detect by iframe(s) — xCaptcha creates _2cFrame1 (checkbox) + _2cFrame2 (challenge)
+        // 3. Iframe-based detection (fallback)
         document.querySelectorAll('iframe[id*="_2cFrame"], iframe[src*="xcaptcha"], iframe[src*="static.xcaptcha.com"]').forEach(function(iframe) {
           var src = iframe.src || '';
           var sitekey = '';
           var m = src.match(/[?&]sitekey=([^&]+)/);
           if (m) sitekey = m[1];
-          // Also check parent element for sitekey
-          var parent = iframe.closest('.wcaptcha, [data-wcaptcha-sitekey]');
+          // Check parent __wCaptchaDiv first, then legacy selectors
+          var parent = iframe.closest('#__wCaptchaDiv, [id*="wCaptcha"]') || iframe.closest('.wcaptcha, [data-wcaptcha-sitekey]');
           if (!sitekey && parent && parent.dataset) {
-            sitekey = parent.dataset.wcaptchaSitekey || parent.dataset.sitekey || '';
+            sitekey = parent.dataset.sitekey || parent.dataset.wcaptchaSitekey || '';
+          }
+          if (!sitekey && iframe.id === '_2cFrame1') {
+            // _2cFrame1 always lives inside __wCaptchaDiv — walk up to parent
+            var p = iframe.parentElement;
+            if (p && p.dataset && p.dataset.sitekey) sitekey = p.dataset.sitekey;
           }
           var id = sitekey || iframe.id || src.substring(0, 60);
-          if (!found.find(function(f) { return f._iframeId === id; })) {
-            found.push({ type: 'xcaptcha', sitekey: sitekey, element: iframe, pageurl: location.href, _iframeId: id });
+          if (id && !seen[id]) {
+            seen[id] = true;
+            found.push({ type: 'xcaptcha', sitekey: sitekey, element: iframe, pageurl: location.href, _iframeId: id, source: 'iframe' });
           }
         });
-        // Detect by wCaptcha input field
+        // 4. Hidden input detection
         document.querySelectorAll('input[name="wcaptcha_response"], input[name="wcaptcha-response"]').forEach(function(input) {
-          var widget = input.closest('.wcaptcha') || input.parentElement;
-          var sitekey = widget && widget.dataset ? (widget.dataset.wcaptchaSitekey || widget.dataset.sitekey) : '';
-          if (!found.find(function(f) { return f.type === 'xcaptcha' && f.sitekey === sitekey; })) {
+          var widget = input.closest('#__wCaptchaDiv') || input.closest('.wcaptcha') || input.parentElement;
+          var sitekey = widget && widget.dataset ? (widget.dataset.sitekey || widget.dataset.wcaptchaSitekey) : '';
+          if (sitekey && !seen[sitekey]) {
+            seen[sitekey] = true;
             found.push({ type: 'xcaptcha', sitekey: sitekey, element: widget || input, input: input, pageurl: location.href });
           }
         });
-        // Detect via wCaptcha global object (from main world)
-        if (window.__wcaptchaInfo) {
-          window.__wcaptchaInfo.forEach(function(info) {
-            if (!found.find(function(f) { return f.sitekey === info.sitekey; })) {
-              found.push({ type: 'xcaptcha', sitekey: info.sitekey, element: null, pageurl: location.href, source: 'global' });
-            }
-          });
+        // 5. Global wCaptcha object — confirms widget exists (sitekey already in DOM)
+        // __wcaptcha doesn't expose siteKey property, but confirms the widget is valid
+        if (window.__wcaptcha) {
+          var _div = document.getElementById('__wCaptchaDiv');
+          if (_div && _div.dataset && _div.dataset.sitekey && !seen[_div.dataset.sitekey]) {
+            seen[_div.dataset.sitekey] = true;
+            found.push({ type: 'xcaptcha', sitekey: _div.dataset.sitekey, element: _div, pageurl: location.href, source: 'global-wcaptcha' });
+          }
         }
         return found;
       }
@@ -417,13 +435,19 @@
     console.log('[CaptchaSolver] Solving xCaptcha (wCaptcha) via API');
     var sitekey = captcha.sitekey;
     if (!sitekey) {
-      // Try to extract from the widget's data attributes
-      var widget = document.querySelector('[data-sitekey][data-wcaptcha], .wcaptcha[data-sitekey]');
-      if (widget) sitekey = widget.dataset.wcaptchaSitekey || widget.dataset.sitekey;
+      // Try to extract from __wCaptchaDiv or widget data attributes
+      var widget = document.getElementById('__wCaptchaDiv') ||
+                   document.querySelector('[data-sitekey][data-wcaptcha], .wcaptcha[data-sitekey]');
+      if (widget) sitekey = widget.dataset.sitekey || widget.dataset.wcaptchaSitekey;
     }
     if (!sitekey) return Promise.reject(new Error('No xCaptcha sitekey found'));
 
-    return sendToBackground('solve-xcaptcha', { sitekey: sitekey, pageurl: captcha.pageurl || location.href }).then(function(token) {
+    // Step 1: Click the checkbox in _2cFrame1 to initialize the captcha session
+    // xCaptcha requires a user click to start — without it, getSessionId() returns false
+    return clickXCaptchaCheckbox().then(function() {
+      console.log('[CaptchaSolver] xCaptcha checkbox clicked, sending to background solver...');
+      return sendToBackground('solve-xcaptcha', { sitekey: sitekey, pageurl: captcha.pageurl || location.href });
+    }).then(function(token) {
       console.log('[CaptchaSolver] Got xCaptcha token: ' + (token || '').substring(0, 30) + '...');
 
       // 1. Set the hidden input (primary — what the form submits)
@@ -439,6 +463,80 @@
 
       // 3. Listen for solved confirmation from frame (optional, for visual feedback only)
       return token;
+    });
+  }
+
+  /**
+   * Initialize the xCaptcha session by calling __wcaptcha.check().
+   * 
+   * xCaptcha requires a "check" action (equivalent to clicking "I'm not a robot")
+   * before the challenge appears. Without this:
+   *   - getSessionId() returns false
+   *   - _2cFrame2 has no src (challenge never loads)
+   *   - The solver API can't find any tasks to solve
+   *
+   * We call __wcaptcha.check() directly — this is the official xCaptcha JS API
+   * and works reliably, unlike trying to simulate checkbox clicks inside the
+   * cross-origin _2cFrame1 iframe.
+   *
+   * Returns a Promise that resolves when the session is initialized.
+   */
+  function clickXCaptchaCheckbox() {
+    return new Promise(function(resolve) {
+      // Check if session already exists
+      if (window.__wcaptcha && typeof window.__wcaptcha.getSessionId === 'function') {
+        try {
+          var sid = window.__wcaptcha.getSessionId();
+          if (sid && sid !== false && sid !== 'false' && sid !== '') {
+            console.log('[CaptchaSolver] xCaptcha session already initialized: ' + String(sid).substring(0, 12) + '...');
+            resolve();
+            return;
+          }
+        } catch(e) {}
+      }
+
+      // Call __wcaptcha.check() — this is the programmatic way to trigger
+      // the checkbox click / session initialization in xCaptcha
+      if (window.__wcaptcha && typeof window.__wcaptcha.check === 'function') {
+        console.log('[CaptchaSolver] Calling __wcaptcha.check() to initialize session...');
+        try {
+          window.__wcaptcha.check();
+        } catch(e) {
+          console.warn('[CaptchaSolver] __wcaptcha.check() error:', e.message);
+        }
+      } else {
+        console.warn('[CaptchaSolver] __wcaptcha.check() not available — session may not initialize');
+      }
+
+      // Also try: postMessage to _2cFrame1 asking it to click the checkbox
+      // (backup for when __wcaptcha isn't on the parent page)
+      try {
+        var frame1 = document.getElementById('_2cFrame1');
+        if (frame1 && frame1.contentWindow) {
+          frame1.contentWindow.postMessage({ type: '__captchaSolverClickXCaptcha' }, '*');
+        }
+      } catch(e) {}
+
+      // Wait for session to initialize (getSessionId returns a string instead of false)
+      var attempts = 0;
+      var maxAttempts = 15; // 4.5s max
+      var checkInterval = setInterval(function() {
+        attempts++;
+        try {
+          var sid = window.__wcaptcha && window.__wcaptcha.getSessionId ? window.__wcaptcha.getSessionId() : null;
+          if (sid && sid !== false && sid !== 'false' && sid !== '') {
+            console.log('[CaptchaSolver] xCaptcha session initialized: ' + String(sid).substring(0, 12) + '...');
+            clearInterval(checkInterval);
+            resolve();
+            return;
+          }
+        } catch(e) {}
+        if (attempts >= maxAttempts) {
+          clearInterval(checkInterval);
+          console.log('[CaptchaSolver] xCaptcha session init timeout — proceeding anyway');
+          resolve();
+        }
+      }, 300);
     });
   }
 

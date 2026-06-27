@@ -12,18 +12,30 @@
 
   // Extract sitekey from URL params or global
   function getSiteKey() {
-    // From URL params
     var params = new URLSearchParams(location.search);
     if (params.get('sitekey')) return params.get('sitekey');
-    // From global (set by xCaptcha's own JS)
     if (window.SITE_KEY) return window.SITE_KEY;
-    // From parent's data attributes (via postMessage request)
     return null;
   }
 
   var SITE_KEY = getSiteKey();
   var CAPTCHA_SESSION = window.CAPTCHA_SESSION;
   var CLIENT_ID = window.CLIENT_ID;
+
+  /* — Detect frame type — */
+  var isChallengeFrame = !!document.querySelector('.task-wrapper') ||
+                          !!document.querySelector('#app .wrapper') ||
+                          location.pathname.includes('/captcha/');
+
+  var isCheckboxFrame = !isChallengeFrame &&
+                        (location.hostname.includes('static.xcaptcha.com') ||
+                         location.hostname.includes('xcaptcha.com')) &&
+                        !document.querySelector('.task-wrapper');
+
+  // Also detect checkbox frame by looking for the checkbox element itself
+  if (!isChallengeFrame && document.querySelector('input[type="checkbox"], [role="checkbox"]')) {
+    isCheckboxFrame = true;
+  }
 
   /* — Solve via background API (2captcha-compatible) — */
   async function solveViaAPI(siteKey) {
@@ -48,7 +60,6 @@
   /* — Submit token to parent page — */
   function submitToParent(token) {
     if (!token) return;
-    // Send to parent content.js
     window.parent.postMessage({
       type: '__captchaSolverXCaptchaSolved',
       token: token,
@@ -57,9 +68,65 @@
     console.log('[CaptchaSolver] xCaptcha: Token submitted to parent');
   }
 
-  /* — Listen for token injection from parent (inject.js) — */
+  /* — Click the xCaptcha checkbox inside the checkbox iframe (_2cFrame1) —
+   * xCaptcha requires a click on the checkbox to initialize the server-side
+   * session. Without this, getSessionId() returns false and solving fails.
+   */
+  function clickXCaptchaCheckbox() {
+    console.log('[CaptchaSolver] xCaptcha: Looking for checkbox to click...');
+
+    // Strategy 1: Find and click the actual checkbox element
+    var checkbox = document.querySelector('input[type="checkbox"]') ||
+                   document.querySelector('.checkbox') ||
+                   document.querySelector('[role="checkbox"]') ||
+                   document.querySelector('#checkbox') ||
+                   document.querySelector('label input');
+
+    if (checkbox) {
+      console.log('[CaptchaSolver] xCaptcha: Found checkbox element, clicking...');
+      checkbox.click();
+      checkbox.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      checkbox.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      checkbox.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+      return true;
+    }
+
+    // Strategy 2: Find and click the checkbox table cell / container
+    // xCaptcha uses a table layout in _2cFrame1
+    var tds = document.querySelectorAll('td');
+    for (var i = 0; i < tds.length; i++) {
+      if (tds[i].querySelector('input[type="checkbox"]') ||
+          tds[i].classList.contains('checkbox') ||
+          tds[i].id === 'checkbox') {
+        console.log('[CaptchaSolver] xCaptcha: Found checkbox container td, clicking...');
+        tds[i].click();
+        return true;
+      }
+    }
+
+    // Strategy 3: Click by coordinates (checkbox is ~30px from left, vertically centered)
+    console.log('[CaptchaSolver] xCaptcha: No checkbox element found, clicking by coordinates...');
+    var el = document.elementFromPoint(30, 39);
+    if (el) {
+      el.click();
+      console.log('[CaptchaSolver] xCaptcha: Clicked element at (30,39): ' + el.tagName + '.' + el.className);
+      return true;
+    }
+
+    console.warn('[CaptchaSolver] xCaptcha: Could not find anything to click for checkbox');
+    return false;
+  }
+
+  /* — Listen for messages from parent content.js — */
   window.addEventListener('message', function(e) {
     if (!e.data || !e.data.type) return;
+
+    // Click checkbox command from parent content.js
+    // The parent can't click inside cross-origin iframes, so we do it here
+    if (e.data.type === '__captchaSolverClickXCaptcha') {
+      console.log('[CaptchaSolver] xCaptcha: Received checkbox click command');
+      clickXCaptchaCheckbox();
+    }
 
     // Solve command from parent content.js
     if (e.data.type === '__captchaSolverSolveXCaptcha' && e.data.siteKey) {
@@ -80,12 +147,10 @@
     // Token from parent inject.js (for direct injection inside iframe)
     if (e.data.type === '__captchaSolverXCaptchaToken' && e.data.token) {
       console.log('[CaptchaSolver] xCaptcha: Received token from parent, injecting...');
-      // Try to set it in the Vue app if we're inside the challenge frame
       try {
         var app = document.querySelector('#app');
         if (app && app.__vue__) {
           var vm = app.__vue__;
-          // Mark as solved in the Vue component
           if (vm.$children && vm.$children[0]) {
             vm.$children[0].solved = true;
           }
@@ -95,11 +160,6 @@
   });
 
   // Auto-solve if we detect a challenge and have a sitekey
-  // (But only if we're inside the challenge iframe, not the checkbox iframe)
-  var isChallengeFrame = !!document.querySelector('.task-wrapper') ||
-                          !!document.querySelector('#app .wrapper') ||
-                          location.pathname.includes('/captcha/');
-
   if (isChallengeFrame && SITE_KEY) {
     console.log('[CaptchaSolver] xCaptcha: Challenge frame detected, auto-solving...');
     setTimeout(function() {
@@ -111,5 +171,6 @@
     }, 1500);
   }
 
-  console.log('[CaptchaSolver] xCaptcha frame script initialized (sitekey=' + (SITE_KEY || 'none') + ', challenge=' + isChallengeFrame + ')');
+  console.log('[CaptchaSolver] xCaptcha frame script initialized (sitekey=' + (SITE_KEY || 'none') +
+    ', challenge=' + isChallengeFrame + ', checkbox=' + isCheckboxFrame + ')');
 })();
