@@ -1,6 +1,6 @@
 /* background.js — Service Worker for CaptchaSolver Extension v2
  * Routes captcha solve requests to self-hosted solver backends
- * Universal (:8844) → forwards to Turnstile (:8822) + reCAPTCHA (:8833)
+ * Universal (:8844) → forwards to Turnstile (:8822, V2) + reCAPTCHA (:8833)
  */
 
 const DEFAULTS = {

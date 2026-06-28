@@ -29,15 +29,15 @@ Auto-detect and solve **reCAPTCHA v2**, **Cloudflare Turnstile**, **hCaptcha**, 
 │  │  token inject)│  │     ▼                                ▼
 │  ├───────────────┤  │  ┌────────────────┐   ┌──────────────────┐
 │  │ background.js │  │  │ Turnstile :8822 │   │ reCAPTCHA :8833  │
-│  │ (API routing) │  │  │ Playwright +    │   │ Playwright +      │
-│  ├───────────────┤  │  │ Headless Chrome  │   │ CaptchaPlugin     │
+│  │ (API routing) │  │  │ nodriver +      │   │ Playwright +      │
+│  ├───────────────┤  │  │ camoufox (V2)    │   │ CaptchaPlugin     │
 │  │ popup/        │  │  └────────────────┘   └──────────────────┘
 │  │ (UI dashboard)│  │
 │  └───────────────┘  │
 └─────────────────────┘
 ```
 
-The extension uses **separate solver instances** (ports 8844/8833/8822) that support `json=1` responses per the 2captcha API spec. Your original solvers (ports 8855/8866/8877) are untouched and use plain-text responses only.
+The extension uses **separate solver instances** (ports 8844/8833/8822) that support `json=1` responses per the 2captcha API spec. Your original solvers (ports 8855/8866/8878) are untouched and use plain-text responses only.
 
 ## Install
 
@@ -93,7 +93,7 @@ The extension follows the **2captcha API flow**:
 
 ### Why `json=1`?
 
-The 2captcha API spec supports `json=1` for structured JSON responses. The Chrome extension uses this to properly parse responses with `.json()`. The extension-specific solver instances on ports 8844/8833/8822 support this parameter. The original solvers (8855/8866/8877) return plain-text only (`OK|id`, `CAPCHA_NOT_READY`).
+The 2captcha API spec supports `json=1` for structured JSON responses. The Chrome extension uses this to properly parse responses with `.json()`. The extension-specific solver instances on ports 8844/8833/8822 support this parameter. The original solvers (8855/8866/8878) return plain-text only (`OK|id`, `CAPCHA_NOT_READY`).
 
 ## Detection Methods
 
@@ -136,12 +136,12 @@ This extension requires the self-hosted solver backends. Two sets run side by si
 ### Extension-Specific (with `json=1` support)
 - **Universal Solver** — port **8844** (image OCR + hCaptcha + forwarding hub)
 - **reCAPTCHA v2** — port **8833** (Playwright + CaptchaPlugin)
-- **Turnstile** — port **8822** (Playwright + Headless Chrome)
+- **Turnstile** — port **8822** (nodriver + camoufox V2)
 
 ### Original (plain-text responses, for scripts/other tasks)
 - **Universal Solver** — port **8855**
 - **reCAPTCHA v2** — port **8866**
-- **Turnstile** — port **8877**
+- **Turnstile** — port **8878** (nodriver + camoufox V2)
 
 All backends expose a **2captcha-compatible API** (`/in.php` + `/res.php`) plus a direct JSON endpoint (`/solve`).
 
